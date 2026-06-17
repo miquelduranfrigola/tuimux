@@ -35,9 +35,9 @@ TUIMUX_REFRESH="${TUIMUX_REFRESH:-3}"          # panel auto-refresh interval (se
 # remote tmux abort with "missing or unsuitable terminal" and the tab dies.
 # xterm-256color is present essentially everywhere. (Local stays as-is.)
 TUIMUX_REMOTE_TERM="${TUIMUX_REMOTE_TERM:-xterm-256color}"
-# Pause (seconds) after opening a Ghostty tab/window before typing the command
-# into it — must cover the new shell becoming ready. Lower = snappier opens;
-# raise it if the first keystrokes ever get dropped on a slower machine.
+# Pause (seconds) after opening a new tab/window before the command is sent to
+# it — must cover the new shell becoming ready. Lower = snappier opens; raise it
+# if the first keystrokes ever get dropped on a slower machine.
 TUIMUX_SPAWN_DELAY="${TUIMUX_SPAWN_DELAY:-0.2}"
 
 CONFIG_FILE="${TUIMUX_CONFIG:-$HOME/.config/tuimux/config}"
@@ -58,6 +58,19 @@ err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 note() { printf '\033[2m%s\033[0m\n'  "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 usage() { sed -n '3,18p' "$ENGINE_FILE" | sed 's/^# \{0,1\}//'; }
+
+# Which terminal we're running inside, normalized to a spawn driver:
+#   ghostty   → drive Ghostty (AppleScript keybind + keystroke)
+#   terminal  → drive Apple Terminal.app (AppleScript `do script`)
+# Apple Terminal is the universal macOS fallback — always installed and
+# scriptable — so any terminal we don't specifically recognise routes through it.
+# Force a driver with TUIMUX_TERM=ghostty|terminal (e.g. for an unsupported term).
+term_kind() {
+  case "${TUIMUX_TERM:-${TERM_PROGRAM:-}}" in
+    Ghostty|ghostty) echo ghostty ;;
+    *)               echo terminal ;;   # Apple_Terminal + universal fallback
+  esac
+}
 
 # `tailscale status`/`ip` memoized per invocation via env vars. A single __hosts
 # otherwise shells out to tailscale ~16 times (discover + offline + once per host
@@ -330,22 +343,41 @@ open_console() {
   else err "no browser opener found (need 'open' or 'xdg-open')"; fi
 }
 
-# Open a new Ghostty surface running a command by driving Ghostty's own keybind
-# via AppleScript (needs Accessibility), then typing the command:
-#   $1 = "t" (new tab) or "n" (new window); the rest is the command + its args.
-# Ghostty on macOS can't open a tab/window with a command straight from the CLI,
-# hence the keystroke dance. Falls back to `open` (a single window) if AppleScript
-# can't drive Ghostty — note: NO `-n`, so it reuses the running instance rather
-# than spawning a second one (which would add a stray non-tmux startup tab).
+# ----- spawning new terminal surfaces (macOS) --------------------------------
+# Opening a session launches a new terminal tab/window that execs straight into
+# ssh+tmux. This is macOS-only (driven via AppleScript / `osascript`). Two
+# drivers — Ghostty and Apple Terminal.app — chosen by term_kind. Everything
+# routes through term_spawn / term_focus / list_windows so the rest of the engine
+# stays terminal-agnostic.
+
+# AppleScript string-escape: backslash and double-quote.
+osa_escape() {
+  local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"
+}
+
+# The shell command a spawned surface runs: `exec [env hint] <argv…>`, each
+# argument shell-quoted so names with spaces survive. The env hint carries our
+# tailnet identity into the fresh shell: it doesn't inherit the dashboard's env,
+# and "$(hostname -s)" can differ from the tailnet name (e.g. Miquels-MacBook-Pro
+# vs miquel-macbook-pro). Without it the new session could decide "this isn't me"
+# and try to SSH to the local machine by a name that doesn't resolve — the tab
+# would just flash and die.
+build_exec_cmd() {
+  local out="exec" a
+  [ -n "${TUIMUX_SELF_HOST:-}" ] && printf -v out 'exec env TUIMUX_SELF_HOST=%q' "$TUIMUX_SELF_HOST"
+  for a in "$@"; do printf -v out '%s %q' "$out" "$a"; done
+  printf '%s' "$out"
+}
+
+# Ghostty: drive its own keybind via AppleScript (needs Accessibility), then type
+# the command — $1 = "t" (new tab) or "n" (new window). Ghostty on macOS can't
+# open a tab/window with a command straight from the CLI, hence the keystroke
+# dance. Falls back to `open` (a single window) if AppleScript can't drive it —
+# note: NO `-n`, so it reuses the running instance rather than spawning a second.
 # Speed: Ghostty is already frontmost (we run inside it), so the activate pause is
 # tiny; the bigger wait is for the new shell to be ready — TUIMUX_SPAWN_DELAY.
 ghostty_spawn() {
   local key="$1"; shift
-  # Carry our tailnet identity into the fresh shell: it doesn't inherit the
-  # dashboard's env, and "$(hostname -s)" can differ from the tailnet name
-  # (e.g. Miquels-MacBook-Pro vs miquel-macbook-pro). Without this hint the new
-  # session could decide "this isn't me" and try to SSH to the local machine by
-  # a name that doesn't resolve — the tab would just flash and die.
   local env=()
   [ -n "${TUIMUX_SELF_HOST:-}" ] && env=(env "TUIMUX_SELF_HOST=$TUIMUX_SELF_HOST")
   osascript >/dev/null 2>&1 \
@@ -358,19 +390,51 @@ ghostty_spawn() {
     || open -a Ghostty.app --args -e "${env[@]}" "$@"
 }
 
+# Apple Terminal.app: its AppleScript dictionary runs a command directly with
+# `do script` — no keystroke simulation needed, and `do script "cmd"` opens a new
+# WINDOW. For a tab we make one with Cmd-T, then target the new (selected) tab via
+# `do script … in front window`. If the tab keystroke can't be driven we fall back
+# to a new window — so "tab" degrades gracefully to "window" on Terminal.app.
+terminal_spawn() {
+  local mode="$1"; shift
+  local esc; esc="$(osa_escape "$(build_exec_cmd "$@")")"
+  if [ "$mode" = tab ]; then
+    osascript >/dev/null 2>&1 \
+      -e 'tell application "Terminal" to activate' \
+      -e 'tell application "System Events" to keystroke "t" using command down' \
+      -e "delay $TUIMUX_SPAWN_DELAY" \
+      -e "tell application \"Terminal\" to do script \"$esc\" in front window" \
+      && return 0
+  fi
+  osascript >/dev/null 2>&1 \
+    -e 'tell application "Terminal" to activate' \
+    -e "tell application \"Terminal\" to do script \"$esc\""
+}
+
+# Spawn dispatcher: mode is "tab" or "window"; the rest is the command + its args.
+term_spawn() {
+  local mode="$1"; shift
+  case "$(term_kind)" in
+    ghostty) case "$mode" in window) ghostty_spawn n "$@" ;; *) ghostty_spawn t "$@" ;; esac ;;
+    *)       terminal_spawn "$mode" "$@" ;;
+  esac
+}
+
 # Note: spawned surfaces re-enter the engine via `bash <engine> …` rather than
 # the `tuimux` wrapper, so the new tab skips a whole Python interpreter startup
 # (~150ms) before it can attach.
-open_browse() {            # open a Ghostty tab that drops into tmux's control panel
-  ghostty_spawn t bash "$ENGINE_FILE" __browse "$1"
+open_browse() {            # open a new surface that drops into tmux's control panel
+  term_spawn tab bash "$ENGINE_FILE" __browse "$1"
 }
 
-# List Ghostty tabs and the window each lives in, so the dashboard can show
-# where a session is open ("this window" vs another). Output: "<win>|<title>"
-# per line, where <win> is the AppleScript window order (z-order). The UI uses
-# it only to group tabs by window and to spot the window holding the tuimux
-# tab. Single-tab windows have no tab group, so we fall back to the window name.
-list_windows() {
+# List the local terminal's windows/tabs and which window each lives in, so the
+# dashboard can show where a session is open ("this window" vs another). Output:
+# "<win>|<title>" per line, <win> being the window order (z-order). Best-effort:
+# if it can't be read, the UI just falls back to showing the attaching term type.
+
+# Ghostty: tabs are radio buttons in each window's tab group; single-tab windows
+# have no tab group, so we fall back to the window name.
+ghostty_windows() {
   osascript 2>/dev/null <<'OSA'
 tell application "System Events"
   if not (exists process "ghostty") then return ""
@@ -398,15 +462,41 @@ end tell
 OSA
 }
 
-# Open a session in a new terminal surface. The new surface runs `tuimux
-# __attach …`, which execs straight into ssh+tmux.
-# Try to focus an existing Ghostty tab whose title matches the session name
-# (tabs are titled "#S · #W" via set-titles). Handles both multi-tab windows
-# (click the matching tab) and single-tab windows (no tab group — match on the
-# window title), then raises that window. Returns 0 if focused.
-focus_tab() {
+# Terminal.app: each window's title bar reflects its selected tab's title (the
+# "#S · #W" string tmux sets via set-titles), so one line per window suffices —
+# tuimux opens sessions as separate windows here.
+terminal_windows() {
+  osascript 2>/dev/null <<'OSA'
+tell application "Terminal"
+  set out to ""
+  set i to 0
+  repeat with w in windows
+    set i to i + 1
+    try
+      set out to out & i & "|" & (name of w) & linefeed
+    end try
+  end repeat
+  return out
+end tell
+OSA
+}
+
+list_windows() {
+  case "$(term_kind)" in
+    ghostty) ghostty_windows ;;
+    *)       terminal_windows ;;
+  esac
+}
+
+# Focus an existing surface whose title matches the session name (surfaces are
+# titled "#S · #W" via set-titles) and raise it. Returns 0 if focused. Too-short
+# names (0,1) are ambiguous — don't guess.
+
+# Ghostty: click the matching tab (multi-tab windows) or match the window title
+# (single-tab windows), then AXRaise that window.
+ghostty_focus() {
   local n="$1"
-  [ ${#n} -ge 3 ] || return 1   # too-short names (0,1) are ambiguous — don't guess
+  [ ${#n} -ge 3 ] || return 1
   osascript >/dev/null 2>&1 <<OSA
 tell application "System Events" to tell process "ghostty"
   set target to missing value
@@ -436,16 +526,56 @@ end tell
 OSA
 }
 
+# Terminal.app: match a window title (or a tab's custom title), select that tab,
+# bring its window to front. No Accessibility needed — all via Terminal's own API.
+terminal_focus() {
+  local n="$1"
+  [ ${#n} -ge 3 ] || return 1
+  osascript >/dev/null 2>&1 <<OSA
+tell application "Terminal"
+  set target to missing value
+  repeat with w in windows
+    if (name of w) contains "$n" then
+      set target to w
+      exit repeat
+    end if
+    repeat with t in tabs of w
+      try
+        if (custom title of t) contains "$n" then
+          set selected of t to true
+          set target to w
+          exit repeat
+        end if
+      end try
+    end repeat
+    if target is not missing value then exit repeat
+  end repeat
+  if target is missing value then error "not found"
+  set index of target to 1
+  activate
+end tell
+OSA
+}
+
+term_focus() {
+  case "$(term_kind)" in
+    ghostty) ghostty_focus "$@" ;;
+    *)       terminal_focus "$@" ;;
+  esac
+}
+
+# Open a session in a new terminal surface. The new surface runs `tuimux
+# __attach …`, which execs straight into ssh+tmux.
 open_surface() {
   local mode="$1" host="$2" session="$3" action="$4"
   case "$action" in attach|new) ;; *) return 0 ;; esac   # ignore headers/spacers
   case "$mode" in
     auto)
-      # already open in a tab? jump to it. otherwise open a fresh tab.
-      if [ "$action" = "attach" ] && focus_tab "$session"; then return 0; fi
+      # already open in a surface? jump to it. otherwise open a fresh tab.
+      if [ "$action" = "attach" ] && term_focus "$session"; then return 0; fi
       open_surface tab "$host" "$session" "$action" ;;
-    window) ghostty_spawn n bash "$ENGINE_FILE" __attach "$host" "$session" "$action" ;;
-    tab) ghostty_spawn t bash "$ENGINE_FILE" __attach "$host" "$session" "$action" ;;
+    window) term_spawn window bash "$ENGINE_FILE" __attach "$host" "$session" "$action" ;;
+    tab)    term_spawn tab    bash "$ENGINE_FILE" __attach "$host" "$session" "$action" ;;
   esac
 }
 
@@ -537,7 +667,16 @@ doctor() {
   self_ip="$(tailscale ip -4 2>/dev/null | head -1)"
   owner="$(tailscale status 2>/dev/null | awk -v ip="$self_ip" '$1==ip {print $3; exit}')"
   printf 'this machine: %s  (owner %s)\n' "${self_ip:-?}" "${owner:-?}"
-  printf 'login user:   %s\n\n' "$TUIMUX_LOGIN"
+  printf 'login user:   %s\n' "$TUIMUX_LOGIN"
+  # how this terminal will open sessions (spawning is macOS-only, via osascript)
+  if have osascript; then
+    case "$(term_kind)" in
+      ghostty) printf 'terminal:     %s → new tabs/windows via Ghostty\n\n' "${TERM_PROGRAM:-?}" ;;
+      *)       printf 'terminal:     %s → new windows via Apple Terminal.app\n\n' "${TERM_PROGRAM:-?}" ;;
+    esac
+  else
+    printf 'terminal:     opening sessions in new tabs/windows needs macOS (osascript)\n\n'
+  fi
   hosts="$(discover_hosts)" || return 1
   printf 'machines:\n'
   for h in $hosts; do

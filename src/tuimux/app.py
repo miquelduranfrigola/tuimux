@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tuimux — a Textual dashboard for tmux sessions across your tailnet.
 
-The heavy lifting (Tailscale discovery, tmux/ssh probing, Ghostty tab spawning,
+The heavy lifting (Tailscale discovery, tmux/ssh probing, terminal tab spawning,
 keep-awake, claude/state detection) lives in the bundled `engine.sh`; this is
 purely the front-end, calling it for data and actions.
 """
@@ -92,7 +92,7 @@ ACTION_TIMEOUT = float(os.environ.get("TUIMUX_ACTION_TIMEOUT", "15") or 15)
 # Host discovery (tailscale status) — bounded so a wedged tailscaled can't hang
 # the host-scan worker indefinitely.
 HOSTS_TIMEOUT = float(os.environ.get("TUIMUX_HOSTS_TIMEOUT", "8") or 8)
-# Ghostty window/tab scan (AppleScript) used to show where a session is open.
+# Terminal window/tab scan (AppleScript) used to show where a session is open.
 WINDOWS_TIMEOUT = float(os.environ.get("TUIMUX_WINDOWS_TIMEOUT", "5") or 5)
 
 
@@ -140,6 +140,16 @@ def _uptime(created):
     if secs < 86400:
         return f"{secs // 3600}h"
     return f"{secs // 86400}d"
+
+
+def _title_parts(title):
+    """Split a window/tab title into comparable components.
+
+    Ghostty titles are a single string ("<session> · <window>"); Terminal.app
+    decorates them as "<login> — <session> · <window> — <process> — <WxH>".
+    Splitting on the em-dash yields one component per terminal that we can match
+    exactly, so Terminal's decorations don't defeat the lookup."""
+    return [p.strip() for p in title.split("—")]
 
 
 def _map_term(t):
@@ -444,7 +454,7 @@ class Tuimux(App):
         self._last_sig = None
         self._last_keys = []
         self._last_cells = []
-        # Ghostty layout: [(win_index, tab_title)] and the window holding us
+        # terminal layout: [(win_index, tab_title)] and the window holding us
         self._windows = []
         self._self_win = None
         self._last_input = 0.0  # monotonic time of the last keypress (idle debounce)
@@ -560,7 +570,7 @@ class Tuimux(App):
 
     @work(exclusive=True, thread=True, group="windows")
     def _scan_windows(self):
-        # Read Ghostty's window/tab layout so sessions can show where they're
+        # Read the terminal's window/tab layout so sessions can show where they're
         # open. Local + read-only (no focus stealing); falls back to nothing.
         out = _run(["__windows"], timeout=WINDOWS_TIMEOUT).stdout
         wins, self_win = [], None
@@ -570,7 +580,9 @@ class Tuimux(App):
                 continue
             idx, title = idx.strip(), title.strip()
             wins.append((idx, title))
-            if title.lower() == "tuimux":  # the dashboard's own tab
+            # the dashboard's own window — its title is "tuimux" (one of the
+            # em-dash components on Terminal.app, the whole title on Ghostty)
+            if any(p.lower() == "tuimux" for p in _title_parts(title)):
                 self_win = idx
         self.call_from_thread(self._set_windows, wins, self_win)
 
@@ -582,10 +594,12 @@ class Tuimux(App):
     def _window_label(self, session_name):
         """Where this session's Ghostty tab lives, or None if not found locally.
 
-        tuimux-opened tabs are titled "<session> · <window>" (tmux set-titles),
-        so we match the part before " · " against the session name."""
+        tuimux-opened surfaces are titled "<session> · <window>" (tmux set-titles),
+        so we match the part before " · " against the session name — per title
+        component, so Terminal.app's "<login> — …" decorations don't get in the way."""
         for idx, title in self._windows:
-            if title.split(" · ", 1)[0].strip() == session_name:
+            if any(p.split(" · ", 1)[0].strip() == session_name
+                   for p in _title_parts(title)):
                 if self._self_win is not None and idx == self._self_win:
                     return "this window"
                 return "other window"

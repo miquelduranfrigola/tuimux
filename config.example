@@ -14,13 +14,18 @@
 # Per-host SSH connect timeout (seconds).
 # TUIMUX_SSH_TIMEOUT=5
 
+# Which terminal to drive when opening sessions in new tabs/windows (macOS).
+# Auto-detected from $TERM_PROGRAM: "ghostty" for Ghostty, otherwise Apple
+# Terminal.app. Set this to force a driver (e.g. from an unsupported terminal).
+# TUIMUX_TERM=ghostty   # or: terminal
+
 # TERM used for remote sessions. Ghostty's own terminfo (xterm-ghostty) usually
 # isn't installed on other machines, which makes remote tmux abort; the default
 # is the universally-present xterm-256color. (Local sessions keep your TERM.)
 # TUIMUX_REMOTE_TERM=xterm-256color
 
-# Pause (seconds) after opening a Ghostty tab/window before the command is typed
-# into it. Lower = snappier opens; raise it only if the first keystrokes ever get
+# Pause (seconds) after opening a new tab/window before the command is sent to
+# it. Lower = snappier opens; raise it only if the first keystrokes ever get
 # dropped when opening a session on a slow machine.
 # TUIMUX_SPAWN_DELAY=0.2
 
@@ -38,5 +43,5 @@
 # How long host discovery (tailscale status) may run before giving up this tick.
 # TUIMUX_HOSTS_TIMEOUT=8
 
-# How long the Ghostty window/tab scan (used for the "OPEN IN" column) may run.
+# How long the terminal window/tab scan (used for the "OPEN IN" column) may run.
 # TUIMUX_WINDOWS_TIMEOUT=5

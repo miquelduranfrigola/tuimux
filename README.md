@@ -9,8 +9,11 @@ See and jump into every tmux session on every machine on your
 pip install .          # or: pipx install .
 ```
 
-Needs `tmux`, `ssh`, `tailscale`, and a terminal (Ghostty recommended). On each
-remote machine: `sudo tailscale up --ssh` and install `tmux`.
+Needs `tmux`, `ssh`, `tailscale`, and a terminal. On macOS, opening sessions in
+new tabs/windows works with **Ghostty** (recommended) and **Apple Terminal.app**;
+any other terminal falls back to Terminal.app (force a driver with
+`TUIMUX_TERM=ghostty|terminal`). On each remote machine: `sudo tailscale up --ssh`
+and install `tmux`.
 
 ## Use
 
