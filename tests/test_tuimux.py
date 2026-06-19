@@ -131,12 +131,12 @@ def _view_for(hosts, results):
 
 def test_view_status_words_per_state():
     hosts = [
-        ("me", True, "online", ""),
-        ("rem", False, "online", ""),
-        ("busyh", False, "online", ""),
-        ("noss", False, "online", ""),
-        ("off", False, "offline", "2h ago"),
-        ("pending", False, "online", ""),  # left unprobed → "checking…"
+        ("me", True, "online", "", "compute"),
+        ("rem", False, "online", "", "compute"),
+        ("busyh", False, "online", "", "compute"),
+        ("noss", False, "online", "", "compute"),
+        ("off", False, "offline", "2h ago", "compute"),
+        ("pending", False, "online", "", "compute"),  # left unprobed → "checking…"
     ]
     base = {"reachable": False, "busy": False, "notmux": False, "awake": False}
     results = {
@@ -159,8 +159,35 @@ def test_view_status_words_per_state():
     assert status["pending"] == "checking…"
 
 
+def test_consumer_devices_show_status_only():
+    # Phones/tablets are status-only: online/offline, never "no ssh", no probe.
+    hosts = [
+        ("phone-on", False, "online", "", "consumer"),
+        ("phone-off", False, "offline", "1m ago", "consumer"),
+    ]
+    rows = _view_for(hosts, {})  # no probe results — must not show "checking…"
+    status = {
+        _cell_text(cells[0]).strip().lstrip("●○◐ "): _cell_text(cells[1])
+        for cells, _ in rows
+    }
+    assert status["phone-on"] == "online"
+    assert status["phone-off"] == "offline"
+    # consumer rows are non-actionable
+    assert all(m["action"] == "none" for _, m in rows)
+
+
+def test_consumer_devices_sorted_last():
+    raw = "comp\t0\toffline\t2h\tcompute\nphone\t0\tonline\t\tconsumer\nme\t1\tonline\t\tcompute\n"
+    with stub_engine(raw):
+        hosts = app.fetch_hosts()
+    assert [h[0] for h in hosts] == ["comp", "me", "phone"]
+
+
 def test_view_bold_only_on_identifiers():
-    hosts = [("me", True, "online", ""), ("off", False, "offline", "1h")]
+    hosts = [
+        ("me", True, "online", "", "compute"),
+        ("off", False, "offline", "1h", "compute"),
+    ]
     results = {
         "me": {
             "reachable": True,
@@ -215,7 +242,7 @@ def test_view_bold_only_on_identifiers():
 
 
 def test_view_row_meta_actions():
-    hosts = [("me", True, "online", "")]
+    hosts = [("me", True, "online", "", "compute")]
     results = {
         "me": {
             "reachable": True,

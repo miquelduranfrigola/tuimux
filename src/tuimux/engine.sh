@@ -251,6 +251,20 @@ offline_hosts() {
     }'
 }
 
+# Consumer devices (phones/tablets/TVs) only *consume* the tailnet — they never
+# run code, so we never SSH into them; the dashboard just shows online/offline
+# and parks them at the end of the list. Classify by the OS column ($4) of the
+# cached tailscale snapshot.
+host_os() {
+  ts_status | awk -v n="$1" '$2==n {print $4; exit}'
+}
+is_consumer() {
+  case "$(host_os "$1" | tr '[:upper:]' '[:lower:]')" in
+    ios|android|androidtv|tvos) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ----- session probe ---------------------------------------------------------
 # Remote probe: list sessions (S|…) plus which sessions are running Claude (C|…).
 # Claude shows up as a `claude` process under a pane's shell, so we scan pane
@@ -277,10 +291,12 @@ done
 true'
 
 # ----- machine-readable backend for the Textual UI ---------------------------
-# List machines as:  host \t islocal(0/1) \t status(online/offline) \t lastseen
-# Reachable same-owner peers first (self leads), then Tailscale-offline ones.
+# List machines as:  host \t islocal(0/1) \t status(online/offline) \t lastseen \t kind
+# kind is "compute" (we SSH into it) or "consumer" (phone/tablet — status only).
+# Reachable same-owner peers first (self leads), then Tailscale-offline ones;
+# the dashboard re-sorts consumer devices to the very end.
 hosts_data() {
-  local h hosts name seen me
+  local h hosts name seen me kind
   # one tailscale snapshot for the whole call (exported so the subshells below
   # reuse it via ts_status/ts_ip), and resolve "me" once instead of per host.
   export _EOS_TS_STATUS _EOS_TS_IP
@@ -289,10 +305,14 @@ hosts_data() {
   hosts="$(discover_hosts)" || return 1
   me="$(self_host)"
   for h in $hosts; do
-    [ "$h" = "$me" ] && printf '%s\t1\tonline\t\n' "$h" || printf '%s\t0\tonline\t\n' "$h"
+    is_consumer "$h" && kind=consumer || kind=compute
+    [ "$h" = "$me" ] && printf '%s\t1\tonline\t\t%s\n' "$h" "$kind" \
+                     || printf '%s\t0\tonline\t\t%s\n' "$h" "$kind"
   done
   offline_hosts | while IFS="$(printf '\t')" read -r name seen; do
-    [ -n "$name" ] && printf '%s\t0\toffline\t%s\n' "$name" "$seen"
+    [ -n "$name" ] || continue
+    is_consumer "$name" && kind=consumer || kind=compute
+    printf '%s\t0\toffline\t%s\t%s\n' "$name" "$seen" "$kind"
   done
 }
 

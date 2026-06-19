@@ -123,7 +123,11 @@ def fetch_hosts():
         is_local = parts[1].strip() == "1"
         status = parts[2].strip() if len(parts) > 2 else "online"
         lastseen = parts[3].strip() if len(parts) > 3 else ""
-        res.append((name, is_local, status, lastseen))
+        kind = parts[4].strip() if len(parts) > 4 else "compute"
+        res.append((name, is_local, status, lastseen, kind))
+    # Consumer devices (phones/tablets) don't run code — park them at the end,
+    # keeping the engine's order within each group (stable sort).
+    res.sort(key=lambda r: r[4] == "consumer")
     return res
 
 
@@ -261,7 +265,7 @@ def probe(host):
 
 
 def _probe_or_offline(h):
-    name, _is_local, status, lastseen = h
+    name, _is_local, status, lastseen, _kind = h
     if status == "offline":
         # Tailscale already reports it down — skip the SSH probe (and its timeout).
         info = {
@@ -565,13 +569,15 @@ class Tuimux(App):
         self._hosts = hosts
         # Tell the engine which host is us, so per-host probes skip the tailscale
         # lookups self_host would otherwise run on every call.
-        for name, is_local, _status, _seen in hosts:
+        for name, is_local, _status, _seen, _kind in hosts:
             if is_local:
                 _ENV["TUIMUX_SELF_HOST"] = name
                 break
         self._render()  # show machines right away, before any probe returns
         for h in hosts:
-            name = h[0]
+            name, kind = h[0], h[4]
+            if kind == "consumer":
+                continue  # phones/tablets: show online/offline only, never SSH
             if name not in self._probing:
                 self._probing.add(name)
                 self._probe_one(h)
@@ -647,11 +653,31 @@ class Tuimux(App):
     #           agent) — meaning carried by colour, not weight.
     def _view(self):
         rows = []
-        for host, is_local, status, _lastseen in self._hosts:
+        for host, is_local, status, _lastseen, kind in self._hosts:
             info = self._results.get(host)
             machine = {"host": host, "session": None, "action": "machine"}
             dead = {"host": host, "session": None, "action": "none"}
-            if info is None:
+            if kind == "consumer":
+                # phones/tablets: never SSH'd — just report online/offline.
+                if status == "offline":
+                    seen = _lastseen
+                    rows.append(
+                        _row(
+                            dead,
+                            name=(("○ ", "dim"), (host, "dim")),
+                            status=(("offline", "dim italic"),),
+                            state=((seen, "dim"),) if seen else (),
+                        )
+                    )
+                else:
+                    rows.append(
+                        _row(
+                            dead,
+                            name=(("● ", "dim"), (host, "dim")),
+                            status=(("online", "dim"),),
+                        )
+                    )
+            elif info is None:
                 # not probed yet this session — neutral placeholder, no waiting
                 rows.append(
                     _row(
