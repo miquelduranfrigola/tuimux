@@ -987,6 +987,12 @@ fi
 SNIP
 }
 
+# Machine-readable autostart state for the dashboard: prints "on" or "off".
+autostart_state() {
+  local rc; rc="${TUIMUX_RC:-$(default_rc)}"
+  _block_present "$rc" '# >>> tuimux autostart >>>' && echo on || echo off
+}
+
 autostart() {
   local action="${1:-status}" rc lp kind did=0
   rc="${TUIMUX_RC:-$(default_rc)}"
@@ -1109,6 +1115,7 @@ case "${1:-}" in
   __windows     ) list_windows ;;
   __selfwin     ) self_winid ;;
   __autoname    ) docker_name ;;
+  __autostart   ) autostart_state ;;
   __console     ) open_console ;;
   __awaketoggle ) shift; toggle_awake "${1:-}" >/dev/null 2>&1 ;;
   -h|--help|"" ) usage ;;

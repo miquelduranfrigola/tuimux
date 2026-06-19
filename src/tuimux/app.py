@@ -430,6 +430,8 @@ class Tuimux(App):
         border-title-color: $primary;
         border-title-style: bold;
         border-title-align: center;
+        border-subtitle-color: $text-muted;
+        border-subtitle-align: right;
         padding: 1 2;
         margin: 1 2;
         height: 1fr;
@@ -514,6 +516,7 @@ class Tuimux(App):
         self.sub_title = os.environ.get("TERM_PROGRAM", "terminal").lower()
         self._load_subtitle()  # fill in the login name off the UI thread
         self._capture_self_window()  # learn our own window id, for "new tab" targeting
+        self._load_autostart()  # show whether `tuimux autostart` is on, in the border
         # On Linux X11, jumping to an already-open tab and the OPEN IN column
         # need wmctrl or xdotool — without them the dashboard can't see local
         # tabs at all, so every "open" silently spawns a fresh surface. Surface
@@ -563,6 +566,19 @@ class Tuimux(App):
         self.call_from_thread(
             setattr, self, "sub_title", f"{login} · {term}" if login else term
         )
+
+    @work(thread=True)
+    def _load_autostart(self):
+        state = _run(["__autostart"], timeout=HOSTS_TIMEOUT).stdout.strip()
+        self.call_from_thread(self._set_autostart, state)
+
+    def _set_autostart(self, state):
+        # Note in the panel's bottom border whether new terminals auto-attach.
+        try:
+            wrap = self.query_one("#table-wrap")
+        except Exception:
+            return
+        wrap.border_subtitle = "autostart: on" if state == "on" else "autostart: off"
 
     @work(thread=True)
     def _capture_self_window(self):

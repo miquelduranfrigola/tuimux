@@ -192,6 +192,27 @@ def test_autostart_bash_skips_link_when_profile_already_sources_bashrc():
         assert "# >>> tuimux autostart >>>" in open(bashrc).read()
 
 
+def test_autostart_state_reports_on_off_for_the_panel():
+    # `__autostart` is the machine-readable on/off the dashboard shows in its border.
+    with tempfile.TemporaryDirectory() as d:
+        rc = os.path.join(d, "rc")
+        env = {**os.environ, "TUIMUX_RC": rc}
+
+        def state():
+            return subprocess.run(
+                ["bash", app.ENGINE, "__autostart"],
+                capture_output=True,
+                text=True,
+                env=env,
+            ).stdout.strip()
+
+        assert state() == "off"
+        _autostart("on", rc)
+        assert state() == "on"
+        _autostart("off", rc)
+        assert state() == "off"
+
+
 def test_autostart_snippet_carries_every_guard():
     with tempfile.TemporaryDirectory() as d:
         rc = os.path.join(d, "rc")
