@@ -97,6 +97,134 @@ def test_detach_outside_tmux_is_friendly_noop():
     assert "not inside a tmux session" in (r.stdout + r.stderr).lower()
 
 
+# ---- CLI: autostart (auto-attach every new local terminal) ------------------
+def _autostart(action, rc):
+    r = subprocess.run(
+        ["bash", app.ENGINE, "autostart", action],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TUIMUX_RC": rc},
+    )
+    return r.stdout + r.stderr  # `note` reports on stderr
+
+
+def test_autostart_on_off_status_and_idempotency():
+    with tempfile.TemporaryDirectory() as d:
+        rc = os.path.join(d, "rc")
+        with open(rc, "w") as f:
+            f.write("export FOO=1\nalias x=y\n")
+
+        assert "off" in _autostart("status", rc)
+        _autostart("on", rc)
+        assert "on" in _autostart("status", rc)
+        body = open(rc).read()
+        assert "# >>> tuimux autostart >>>" in body and "export FOO=1" in body
+
+        _autostart("on", rc)  # idempotent — exactly one block
+        assert open(rc).read().count("# >>> tuimux autostart >>>") == 1
+
+        _autostart("off", rc)
+        after = open(rc).read()
+        assert "tuimux autostart" not in after  # block removed
+        assert "export FOO=1" in after and "alias x=y" in after  # rest untouched
+        assert "off" in _autostart("status", rc)
+
+
+def test_autostart_bash_links_login_profile():
+    # bash login shells (macOS) read .bash_profile/.profile, not .bashrc — so
+    # `autostart on` must also make the login profile source .bashrc, and `off`
+    # must remove both blocks. Force SHELL=bash and point both files at temps.
+    def run(action, bashrc, profile):
+        return subprocess.run(
+            ["bash", app.ENGINE, "autostart", action],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "SHELL": "/bin/bash",
+                "TUIMUX_RC": bashrc,
+                "TUIMUX_LOGIN_RC": profile,
+            },
+        )
+
+    with tempfile.TemporaryDirectory() as d:
+        bashrc = os.path.join(d, "bashrc")
+        profile = os.path.join(d, "bash_profile")
+        with open(profile, "w") as f:
+            f.write("export PATH=/x\n")  # a login profile that does NOT source .bashrc
+
+        run("on", bashrc, profile)
+        assert "# >>> tuimux autostart >>>" in open(bashrc).read()
+        prof = open(profile).read()
+        assert "# >>> tuimux autostart (login) >>>" in prof  # linked to .bashrc
+        assert '. "$HOME/.bashrc"' in prof
+
+        run("on", bashrc, profile)  # idempotent — one login block
+        assert open(profile).read().count("# >>> tuimux autostart (login) >>>") == 1
+
+        run("off", bashrc, profile)
+        assert "tuimux autostart" not in open(bashrc).read()
+        after = open(profile).read()
+        assert "tuimux autostart" not in after  # both blocks gone
+        assert "export PATH=/x" in after  # original preserved
+
+
+def test_autostart_bash_skips_link_when_profile_already_sources_bashrc():
+    with tempfile.TemporaryDirectory() as d:
+        bashrc = os.path.join(d, "bashrc")
+        profile = os.path.join(d, "bash_profile")
+        with open(profile, "w") as f:
+            f.write("[ -f ~/.bashrc ] && . ~/.bashrc\n")  # already sources it
+        subprocess.run(
+            ["bash", app.ENGINE, "autostart", "on"],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "SHELL": "/bin/bash",
+                "TUIMUX_RC": bashrc,
+                "TUIMUX_LOGIN_RC": profile,
+            },
+        )
+        # no duplicate source line added to the login profile
+        assert "tuimux autostart (login)" not in open(profile).read()
+        assert "# >>> tuimux autostart >>>" in open(bashrc).read()
+
+
+def test_autostart_snippet_carries_every_guard():
+    with tempfile.TemporaryDirectory() as d:
+        rc = os.path.join(d, "rc")
+        _autostart("on", rc)
+        body = open(rc).read()
+    for guard in (
+        '[ -z "$TMUX" ]',  # not already in tmux
+        '[ -z "$SSH_CONNECTION" ]',  # local only (remote is `tuimux init`)
+        '[ -z "$TUIMUX_NO_AUTOTMUX" ]',  # per-shell opt-out
+        "case $- in *i*",  # interactive shells only
+        "skip-autostart",  # the tuimux-spawned-tab exemption marker
+        "tmux new-session",  # each terminal → its own fresh session
+    ):
+        assert guard in body, guard
+
+
+def test_term_spawn_drops_skip_autostart_marker():
+    # tuimux's own spawns mark the new tab so the rc snippet skips auto-attaching it.
+    with tempfile.TemporaryDirectory() as d:
+        mark = os.path.join(d, "skip")
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {app.ENGINE} __login >/dev/null 2>&1; "
+                "linux_spawn(){ :; }; ghostty_spawn(){ :; }; terminal_spawn(){ :; }; "
+                "term_spawn tab bash x __attach h s attach",
+            ],
+            env={**os.environ, "TUIMUX_SKIP_AUTOSTART": mark},
+            stdin=subprocess.DEVNULL,
+        )
+        assert os.path.exists(mark)
+
+
 # ---- probe parsing -----------------------------------------------------------
 CANNED = "\n".join(
     [

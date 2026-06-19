@@ -10,6 +10,8 @@
 #                             no name = a fresh auto-named one
 #   tuimux detach             Detach THIS terminal's session — it keeps running in
 #                             the background; the terminal drops back to a shell
+#   tuimux autostart on|off   Auto-attach EVERY new local terminal to its own tmux
+#                  |status     session (edits your shell rc); status shows the state
 #   tuimux init <host>        Make a remote auto-tmux on SSH login (opt-in, asks first)
 #   tuimux doctor             Check local deps + per-host reachability and remote tmux
 #   tuimux -h|--help          This help
@@ -47,6 +49,10 @@ TUIMUX_SPAWN_DELAY="${TUIMUX_SPAWN_DELAY:-0.2}"
 # never in whatever window happens to be frontmost (e.g. one you just opened).
 # Keep in sync with app.py's window-self detection.
 TUIMUX_SELF_TITLE="${TUIMUX_SELF_TITLE:-tuimux}"
+# One-shot marker the dashboard drops right before it spawns a surface, so the
+# `tuimux autostart` rc snippet knows THAT terminal was opened by tuimux (and
+# already has its own attach command coming) and skips auto-attaching it.
+TUIMUX_SKIP_AUTOSTART="${TUIMUX_SKIP_AUTOSTART:-$HOME/.cache/tuimux/skip-autostart}"
 
 CONFIG_FILE="${TUIMUX_CONFIG:-$HOME/.config/tuimux/config}"
 # shellcheck disable=SC1090
@@ -65,7 +71,7 @@ SSH_OPTS=(-o ConnectTimeout="$TUIMUX_SSH_TIMEOUT" -o BatchMode=yes -o StrictHost
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 note() { printf '\033[2m%s\033[0m\n'  "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
-usage() { sed -n '3,21p' "$ENGINE_FILE" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,23p' "$ENGINE_FILE" | sed 's/^# \{0,1\}//'; }
 
 # Which terminal we're running inside, normalized to a spawn driver:
 #   ghostty   → drive Ghostty (AppleScript keybind + keystroke)
@@ -593,6 +599,10 @@ OSA
 # Spawn dispatcher: mode is "tab" or "window"; the rest is the command + its args.
 term_spawn() {
   local mode="$1"; shift
+  # This surface is ours and carries its own attach command, so tell the
+  # `tuimux autostart` rc snippet to leave the new shell alone (it consumes the
+  # marker and skips auto-attaching). Harmless when autostart is off.
+  mkdir -p "$(dirname "$TUIMUX_SKIP_AUTOSTART")" 2>/dev/null && : > "$TUIMUX_SKIP_AUTOSTART" 2>/dev/null || true
   if [ "$(os_kind)" = linux ]; then linux_spawn "$mode" "$@"; return; fi
   case "$(term_kind)" in
     ghostty) case "$mode" in window) ghostty_spawn n "$@" ;; *) ghostty_spawn t "$@" ;; esac ;;
@@ -884,6 +894,139 @@ init_host() {
   fi
 }
 
+# ----- autostart (auto-tmux for every LOCAL terminal) ------------------------
+# The local counterpart to `init`: instead of SSH logins on a remote, every new
+# interactive terminal on THIS machine drops into its own fresh tmux session.
+
+# Which shell family we're configuring (drives the bash login-shell hardening).
+rc_kind() {
+  case "${SHELL:-}" in *zsh) echo zsh ;; *bash) echo bash ;; *) echo other ;; esac
+}
+
+# Shell rc this user's INTERACTIVE shells read. TUIMUX_RC overrides it (tests).
+#   zsh  → ~/.zshrc       (sourced by every interactive zsh, login or not)
+#   bash → ~/.bashrc      (interactive non-login; login shells need the link below)
+#   else → ~/.profile
+default_rc() {
+  case "$(rc_kind)" in
+    zsh)  printf '%s' "$HOME/.zshrc" ;;
+    bash) printf '%s' "$HOME/.bashrc" ;;
+    *)    printf '%s' "$HOME/.profile" ;;
+  esac
+}
+
+# bash login shells (e.g. macOS Terminal.app / Ghostty) read .bash_profile (or
+# .bash_login / .profile), NOT .bashrc — so the autostart block in .bashrc wouldn't
+# run there unless one of those sources .bashrc. This is the file we ensure does.
+# TUIMUX_LOGIN_RC overrides it (tests).
+bash_login_profile() {
+  local f
+  for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    [ -f "$f" ] && { printf '%s' "$f"; return; }
+  done
+  printf '%s' "$HOME/.bash_profile"   # none exist → the default login file to create
+}
+
+# Block helpers: present? / append (idempotent, keeps a separating newline) /
+# remove the marked region. index() matches the markers literally (no regex).
+_block_present() { grep -qF "$2" "$1" 2>/dev/null; }   # $1=file $2=begin-marker
+_block_append() {                                        # $1=file $2=snippet-fn
+  [ -s "$1" ] && [ -n "$(tail -c1 "$1" 2>/dev/null)" ] && printf '\n' >> "$1"
+  "$2" >> "$1"
+}
+_block_remove() {                                        # $1=file $2=begin $3=end
+  local tmp; [ -f "$1" ] || return 0
+  tmp="$(mktemp)" || return 1
+  awk -v b="$2" -v e="$3" 'index($0,b){s=1} !s; index($0,e){s=0}' "$1" > "$tmp" \
+    && mv "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+}
+
+# Login-shell link block, added to .bash_profile/.profile so bash login shells pull
+# in .bashrc (and thus the autostart block). Only added when that file doesn't
+# already reference .bashrc — we never duplicate an existing source.
+autostart_login_snippet() {
+cat <<'SNIP'
+# >>> tuimux autostart (login) >>>
+# Load .bashrc in login shells (macOS Terminal.app/Ghostty) so tuimux autostart runs there too.
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+# <<< tuimux autostart (login) <<<
+SNIP
+}
+
+# The rc block installed by `tuimux autostart on`. Self-contained (single-quoted
+# heredoc → nothing expands at install time; every $VAR stays live in your shell).
+# `tmux new-session` (no -s) makes a fresh auto-numbered session each time, so each
+# terminal is its own workspace; the set-titles match what the dashboard's window
+# detection ("go to") expects. The skip-marker is how tuimux's OWN spawned tabs
+# (which carry their own attach command) opt out — see term_spawn.
+autostart_snippet() {
+cat <<'SNIP'
+# >>> tuimux autostart >>>
+# Auto-attach every new interactive terminal to its own tmux session, so it
+# persists and shows up in the tuimux dashboard. Toggle: tuimux autostart off
+# Skip once (e.g. to launch the dashboard itself): TUIMUX_NO_AUTOTMUX=1 <command>
+if [ -z "$TMUX" ] && [ -z "$SSH_CONNECTION" ] && [ -z "$TUIMUX_NO_AUTOTMUX" ] \
+   && command -v tmux >/dev/null 2>&1; then
+  case $- in *i*)
+    if [ -e "$HOME/.cache/tuimux/skip-autostart" ]; then
+      command rm -f "$HOME/.cache/tuimux/skip-autostart"   # this tab was opened by tuimux
+    else
+      tmux set -g set-titles on; tmux set -g set-titles-string '#S · #W'; tmux new-session
+    fi ;;
+  esac
+fi
+# <<< tuimux autostart <<<
+SNIP
+}
+
+autostart() {
+  local action="${1:-status}" rc lp kind did=0
+  rc="${TUIMUX_RC:-$(default_rc)}"
+  kind="$(rc_kind)"
+  lp="${TUIMUX_LOGIN_RC:-$(bash_login_profile)}"
+  case "$action" in
+    on)
+      have tmux || { err "tmux is not installed here."; exit 1; }
+      _block_present "$rc" '# >>> tuimux autostart >>>' \
+        || { _block_append "$rc" autostart_snippet || { err "failed to write $rc"; exit 1; }; did=1; }
+      # bash login shells (macOS) read .bash_profile/.profile, not .bashrc — make
+      # sure one of them sources .bashrc, unless it already references it.
+      if [ "$kind" = bash ] \
+         && ! _block_present "$lp" '# >>> tuimux autostart (login) >>>' \
+         && ! grep -q 'bashrc' "$lp" 2>/dev/null; then
+        _block_append "$lp" autostart_login_snippet && did=1
+      fi
+      if [ "$did" = 1 ]; then
+        note "autostart ON ($rc) — every new terminal now attaches to its own tmux session."
+        [ "$kind" = bash ] && _block_present "$lp" '# >>> tuimux autostart (login) >>>' \
+          && note "(also linked $lp → .bashrc so login shells pick it up.)"
+        note "launch the dashboard itself without it:  TUIMUX_NO_AUTOTMUX=1 tuimux"
+        note "open a new terminal (or restart your shell) for it to take effect."
+      else
+        note "autostart already on ($rc) — nothing to do."
+      fi
+      ;;
+    off)
+      _block_present "$rc" '# >>> tuimux autostart >>>' \
+        && { _block_remove "$rc" '# >>> tuimux autostart >>>' '# <<< tuimux autostart <<<' \
+             || { err "failed to update $rc"; exit 1; }; did=1; }
+      if [ "$kind" = bash ] && _block_present "$lp" '# >>> tuimux autostart (login) >>>'; then
+        _block_remove "$lp" '# >>> tuimux autostart (login) >>>' '# <<< tuimux autostart (login) <<<' && did=1
+      fi
+      [ "$did" = 1 ] && note "autostart OFF ($rc) — new terminals no longer auto-attach." \
+                     || note "autostart already off — nothing to do."
+      ;;
+    status)
+      if _block_present "$rc" '# >>> tuimux autostart >>>'; then
+        note "autostart: on ($rc)"
+      else
+        note "autostart: off ($rc)"
+      fi
+      ;;
+    *) err "usage: tuimux autostart on|off|status"; exit 1 ;;
+  esac
+}
+
 # ----- doctor ----------------------------------------------------------------
 doctor() {
   printf 'tuimux doctor\n==============\n'
@@ -941,6 +1084,7 @@ doctor() {
 case "${1:-}" in
   attach        ) shift; attach_here "${1:-}" ;;
   detach        ) detach_here ;;
+  autostart     ) shift; autostart "${1:-}" ;;
   init          ) shift; init_host "${1:-}" ;;
   doctor        ) doctor ;;
   # ----- backend called by the Textual UI -----

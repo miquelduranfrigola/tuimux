@@ -26,15 +26,23 @@ if needed. Run `tuimux doctor` to see what's detected. On each remote machine:
 ## Use
 
 ```sh
-tuimux                  # the dashboard — all you normally need
-tuimux attach [name]    # put this terminal into a tmux session (attach or create)
-tuimux detach           # detach this terminal; the session keeps running
-tuimux init <host>      # auto-tmux a remote's SSH logins
-tuimux doctor           # check setup
+tuimux                      # the dashboard — all you normally need
+tuimux attach [name]        # put this terminal into a tmux session (attach or create)
+tuimux detach               # detach this terminal; the session keeps running
+tuimux autostart on|off|status  # auto-attach EVERY new local terminal to its own session
+tuimux init <host>          # auto-tmux a remote's SSH logins
+tuimux doctor               # check setup
 ```
 
 Open / rename / detach / close / keep-awake all happen in the dashboard (footer
 lists the keys). Any tmux session shows up regardless of how it was started.
+
+**`tuimux autostart on`** makes every new terminal you open (any app — Ghostty,
+Terminal.app, GNOME Terminal, …) drop straight into its own fresh tmux session, so
+it persists and appears in the dashboard without running `attach` by hand. It adds a
+small guarded block to your shell rc (`~/.zshrc` etc.); `off` removes it, `status`
+shows the state. Skip it for one shell with `TUIMUX_NO_AUTOTMUX=1 <command>` — handy
+for launching the dashboard itself: `TUIMUX_NO_AUTOTMUX=1 tuimux`.
 
 **Opening a session** lands in a new tab **next to the dashboard** (not in whatever
 window happens to be frontmost), or in a new window if you ask for one. If a session
