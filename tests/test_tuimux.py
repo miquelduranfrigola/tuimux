@@ -128,6 +128,8 @@ def test_autostart_on_off_status_and_idempotency():
         assert "on" in _autostart("status", rc)
         body = open(rc).read()
         assert "# >>> tuimux autostart >>>" in body and "export FOO=1" in body
+        # autostart-wrapped terminals enable mouse mode so tmux scrollback scrolls
+        assert "set -g mouse on" in body
 
         _autostart("on", rc)  # idempotent — exactly one block
         assert open(rc).read().count("# >>> tuimux autostart >>>") == 1
