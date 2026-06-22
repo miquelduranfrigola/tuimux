@@ -43,6 +43,12 @@ it persists and appears in the dashboard without running `attach` by hand. It ad
 small guarded block to your shell rc (`~/.zshrc` etc.); `off` removes it, `status`
 shows the state. Skip it for one shell with `TUIMUX_NO_AUTOTMUX=1 <command>`.
 
+Every session tuimux drives gets `mouse on` set, so the trackpad scrolls tmux's
+scrollback and selects text as usual — otherwise being wrapped in tmux hides the
+terminal's own scrollback and scrolling appears to do nothing. To select/copy with
+the terminal's *native* selection instead (bypassing tmux), hold **Shift** while
+dragging (Ghostty, iTerm2, GNOME Terminal; **Option** on Apple Terminal).
+
 The dashboard itself must run **outside** tmux. You don't have to think about it:
 type **`tuimux`** from anywhere — if you happen to be inside a tmux session (e.g.
 because autostart put you there), it detaches that client and relaunches the

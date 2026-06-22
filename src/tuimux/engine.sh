@@ -164,6 +164,17 @@ host_color() {
   printf '%s' "${palette[hash % ${#palette[@]}]}"
 }
 
+# tmux options tuimux sets on every session it drives, as a "cmd1; cmd2; " prefix
+# (run on whichever host owns the session). set-titles makes window titles match
+# the dashboard's "open in" detection; mouse on so the trackpad scrolls tmux's
+# scrollback and selects text — without it, being wrapped in tmux hides the
+# terminal's own scrollback and scrolling does nothing. (Hold Shift to bypass
+# tmux and use the terminal's native selection.) Kept in one place so the attach,
+# new, and autostart paths can't drift apart.
+tmux_opts() {
+  printf "tmux set -g set-titles on; tmux set -g set-titles-string '#S · #W'; tmux set -g mouse on; "
+}
+
 # tmux commands that tint the status bar with the host's accent + a name label,
 # so once you're attached you can see at a glance which machine you're on.
 status_style() {
@@ -343,10 +354,10 @@ do_attach() {
   local host="$1" session="$2" action="$3" mode="${4:-return}" cmd nm
   case "$action" in
     attach) note "attaching to $session on $host …"
-            cmd="tmux set -g set-titles on; tmux set -g set-titles-string '#S · #W'; tmux attach -t '$session'" ;;
+            cmd="$(tmux_opts)tmux attach -t '$session'" ;;
     new)    nm="$session"; [ "$nm" = "$NEW_SENTINEL" ] && nm="$(docker_name)"
             note "opening session '$nm' on $host …"
-            cmd="tmux set -g set-titles on; tmux set -g set-titles-string '#S · #W'; tmux new -A -s '$nm' -c \"\$HOME\"" ;;
+            cmd="$(tmux_opts)tmux new -A -s '$nm' -c \"\$HOME\"" ;;
     none)   err "$host is unreachable."; return 1 ;;
     *)      return 0 ;;
   esac
@@ -867,7 +878,7 @@ cat <<SNIP
 # terminal opened here is discoverable / re-attachable via tuimux.
 # Skip for one connection with:  TUIMUX_NO_AUTOTMUX=1 ssh <host>
 if [ -n "\$SSH_CONNECTION" ] && [ -z "\$TMUX" ] && [ -z "\$TUIMUX_NO_AUTOTMUX" ] && command -v tmux >/dev/null 2>&1; then
-  case \$- in *i*) tmux new -A -s '$TUIMUX_DEFAULT_SESSION' ;; esac
+  case \$- in *i*) tmux set -g mouse on 2>/dev/null; tmux new -A -s '$TUIMUX_DEFAULT_SESSION' ;; esac
 fi
 # <<< tuimux auto-tmux <<<
 SNIP
@@ -977,7 +988,7 @@ if [ -z "\$TMUX" ] && [ -z "\$SSH_CONNECTION" ] && [ -z "\$TUIMUX_NO_AUTOTMUX" ]
       command rm -f "\$HOME/.cache/tuimux/skip-autostart"   # this tab was opened by tuimux
     else
       _tx_name="\$('$self' __autoname 2>/dev/null || command tuimux __autoname 2>/dev/null)"
-      tmux set -g set-titles on; tmux set -g set-titles-string '#S · #W'
+      tmux set -g set-titles on; tmux set -g set-titles-string '#S · #W'; tmux set -g mouse on
       # An explicit if, NOT a ":+" alternate-value expansion: zsh doesn't word-split
       # that, so tmux would get one "-s name" token → a " name" with a leading space.
       if [ -n "\$_tx_name" ]; then tmux new-session -s "\$_tx_name" 2>/dev/null || tmux new-session
