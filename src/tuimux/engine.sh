@@ -404,16 +404,17 @@ true'
 
 # ----- machine-readable backend for the Textual UI ---------------------------
 # List machines, tab-separated:
-#   host \t islocal(0/1) \t status \t lastseen \t kind \t owner \t mapping \t probe \t color
+#   host \t islocal \t status \t lastseen \t kind \t owner \t mapping \t probe \t color \t login
 #   kind    "compute" (we SSH into it) or "consumer" (phone/tablet — status only)
 #   owner   tailnet owner login (e.g. "arnau"), for the org-fleet view
-#   mapping explicit per-host login, or empty (lets the UI show "as <user>")
+#   mapping explicit per-host login, or empty (lets the UI tell mapped from default)
 #   probe   1 if tuimux should SSH-probe it (local, your own, or mapped), else 0 —
 #           org-view hosts you have no account on are listed but not probed
 #   color   the machine's accent (host_color) — UI uses it so the tmux bar matches
+#   login   resolved SSH username (login_for) — who we connect as on this host
 # Self leads; Tailscale-offline ones follow; the dashboard re-sorts consumers last.
 hosts_data() {
-  local h hosts name seen me myowner kind owner mapping probe color
+  local h hosts name seen me myowner kind owner mapping probe color login
   # one tailscale snapshot for the whole call (exported so the subshells below
   # reuse it via ts_status/ts_ip), and resolve "me"/owner once instead of per host.
   export _EOS_TS_STATUS _EOS_TS_IP
@@ -427,10 +428,11 @@ hosts_data() {
     owner="$(host_owner "$h")"; [ -n "$owner" ] || owner="$myowner"
     mapping="$(mapping_for "$h")"
     color="$(host_color "$h")"
+    login="$(login_for "$h")"
     # probe our own machines + anything we've mapped a login for; skip the rest
     if [ "$h" = "$me" ] || [ "$owner" = "$myowner" ] || [ -n "$mapping" ]; then probe=1; else probe=0; fi
-    [ "$h" = "$me" ] && printf '%s\t1\tonline\t\t%s\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" "$color" \
-                     || printf '%s\t0\tonline\t\t%s\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" "$color"
+    [ "$h" = "$me" ] && printf '%s\t1\tonline\t\t%s\t%s\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" "$color" "$login" \
+                     || printf '%s\t0\tonline\t\t%s\t%s\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" "$color" "$login"
   done
   offline_hosts | while IFS="$(printf '\t')" read -r name seen; do
     [ -n "$name" ] || continue
@@ -438,7 +440,8 @@ hosts_data() {
     owner="$(host_owner "$name")"; [ -n "$owner" ] || owner="$myowner"
     mapping="$(mapping_for "$name")"
     color="$(host_color "$name")"
-    printf '%s\t0\toffline\t%s\t%s\t%s\t%s\t0\t%s\n' "$name" "$seen" "$kind" "$owner" "$mapping" "$color"
+    login="$(login_for "$name")"
+    printf '%s\t0\toffline\t%s\t%s\t%s\t%s\t0\t%s\t%s\n' "$name" "$seen" "$kind" "$owner" "$mapping" "$color" "$login"
   done
 }
 

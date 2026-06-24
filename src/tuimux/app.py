@@ -149,7 +149,11 @@ def fetch_hosts(scope="mine"):
         # accent colour computed by the engine (host_color) — kept there as the
         # single source of truth so the tmux status bar matches this row exactly.
         color = parts[8].strip() if len(parts) > 8 else ""
-        res.append((name, is_local, status, lastseen, kind, owner, mapping, probe, color))
+        # resolved SSH username (login_for) — who we connect as on this host.
+        login = parts[9].strip() if len(parts) > 9 else ""
+        res.append(
+            (name, is_local, status, lastseen, kind, owner, mapping, probe, color, login)
+        )
     # Order: your own machines first (so the fleet view still opens on you), then
     # other owners grouped together, consumers (phones/tablets) always last. Stable
     # sort keeps the engine's self-leads order within each group.
@@ -334,7 +338,7 @@ def _probe_or_offline(h):
 # so one cell can mix styles (e.g. a dim marker + a bold host name); an empty
 # tuple renders blank. _row() builds a (cells, meta) pair, filling only the
 # columns you name and leaving the rest empty — keeps _view readable.
-_COLS = ("name", "status", "state", "uptime", "folder", "tabs", "open_in", "agent")
+_COLS = ("name", "status", "state", "uptime", "folder", "tabs", "open_in", "user")
 
 
 def _row(meta, **cells):
@@ -599,11 +603,12 @@ class Tuimux(App):
             ("UPTIME", "uptime", 7),
             ("FOLDER", "folder", 20),
             ("TABS", "tabs", 12),
-            # wide enough for "other window · NN clients"; the transient "resumed"
-            # marker can append a little more, but it only lands on just-reconnected
-            # sessions, which are detached (0 clients) → short, so it fits in practice.
-            ("OPEN IN", "open", 26),
-            ("AGENT", "agent", 10),
+            # one window token ("other window") or "— · NN clients"; the transient
+            # "resumed" marker can append on a just-reconnected (detached) session.
+            ("OPEN IN", "open", 18),
+            # the machine's owner and the login we connect as (gray); blank on
+            # session rows. "miquel · mduranfrigola" is the long case.
+            ("USER", "user", 22),
         ):
             t.add_column(col, key=key, width=w)
         t.focus()
@@ -859,6 +864,27 @@ class Tuimux(App):
             host = ("detached", "dim")
         return [("—", "dim"), (" · ", "dim"), host]
 
+    @staticmethod
+    def _user_cell(owner, login, want_probe, consumer):
+        """The gray USER cell on a machine header: the owner of the box, plus the
+        login we connect as when it's a real one (our own machine or a mapped host)
+        and it differs from the owner. Never empty — "owner · login", or just one
+        name when they're the same or only one is known."""
+        parts = [owner] if owner else []
+        if want_probe and not consumer and login and login != owner:
+            parts.append(login)
+        text = " · ".join(parts) or login or "—"
+        return ((text, "dim"),)
+
+    @staticmethod
+    def _tabs_cell(tabs):
+        """TABS reads "<count>  <active-cmd>"; tint the command violet when the
+        active window is an AI agent (its command contains "claude")."""
+        head, sep, cmd = tabs.partition("  ")
+        if sep and "claude" in cmd.lower():
+            return ((head + sep, "dim"), (cmd, VIOLET))
+        return ((tabs, "dim"),)
+
     # Build the table as plain data — a list of (cells, meta) rows — so we can
     # diff cheaply and only repaint when something actually changed.
     #
@@ -870,19 +896,20 @@ class Tuimux(App):
     #            STATUS word, not session names.
     #   amber  → the one thing that wants you: an agent STATE of "waiting" (plus
     #            keep-awake / no-ssh markers). Kept rare so it actually pops.
-    #   violet → the "claude" agent tag — a single, global "this is an AI agent".
-    #   dim    → everything else: metadata (folder, tabs, uptime, OPEN IN),
+    #   violet → "claude" inside the TABS column (the active window is an AI agent).
+    #   dim    → everything else: metadata (folder, tabs, uptime, OPEN IN, USER),
     #            idle/transient sessions, offline/"checking…" machines, hints.
     def _view(self):
         rows = []
         for h in self._hosts:
-            # Tolerate short host tuples (owner/mapping/probe are newer columns):
-            # default to no owner/mapping and "probe it", i.e. pre-fleet behavior.
+            # Tolerate short host tuples (owner/mapping/probe/color/login are newer
+            # columns): default to no owner/login and "probe it" (pre-fleet behavior).
             host, is_local, status, _lastseen, kind = h[0], h[1], h[2], h[3], h[4]
             owner = h[5] if len(h) > 5 else ""
             mapping = h[6] if len(h) > 6 else ""
             want_probe = h[7] if len(h) > 7 else True
             accent = h[8] if len(h) > 8 else ""  # engine-computed color (may be "")
+            login = h[9] if len(h) > 9 else ""  # resolved SSH user (login_for)
             info = self._results.get(host)
             consumer = kind == "consumer"
             machine = {
@@ -890,14 +917,9 @@ class Tuimux(App):
                 "consumer": consumer, "mapping": mapping,
             }
             dead = {**machine, "action": "none"}
-            # In the org fleet view, tag remote machines with their owner so you can
-            # see whose box it is. Appended to the NAME cell, dim.
-            owner_tag = (
-                (("  " + owner, "dim"),) if self._scope == "org" and owner and not is_local else ()
-            )
-            # Show the SSH user on a remote host only when it's an explicit mapping
-            # (your own machines just use $USER — no need to spell it out).
-            login_tag = ((" · " + mapping, "dim"),) if mapping and not is_local else ()
+            # The USER cell (gray) goes on every machine header: the owner, plus the
+            # login we connect as when it's a real one that adds info. Never empty.
+            user = self._user_cell(owner, login, want_probe, consumer)
             if consumer:
                 # phones/tablets: never SSH'd — just report online/offline.
                 if status == "offline":
@@ -908,6 +930,7 @@ class Tuimux(App):
                             name=(("○ ", "dim"), (host, "dim")),
                             status=(("offline", "dim italic"),),
                             state=((seen, "dim"),) if seen else (),
+                            user=user,
                         )
                     )
                 else:
@@ -916,6 +939,7 @@ class Tuimux(App):
                             dead,
                             name=(("● ", "dim"), (host, "dim")),
                             status=(("online", "dim"),),
+                            user=user,
                         )
                     )
             elif not want_probe:
@@ -925,9 +949,10 @@ class Tuimux(App):
                 rows.append(
                     _row(
                         machine,
-                        name=(("○ ", "dim"), (host, "dim")) + owner_tag,
+                        name=(("○ ", "dim"), (host, "dim")),
                         status=(("no login", "dim italic"),),
                         folder=(("press u to set a login", "dim"),),
+                        user=user,
                     )
                 )
             elif info is None:
@@ -935,8 +960,9 @@ class Tuimux(App):
                 rows.append(
                     _row(
                         machine,
-                        name=(("● ", "dim"), (host, "dim")) + owner_tag,
+                        name=(("● ", "dim"), (host, "dim")),
                         status=(("checking…", "dim italic"),),
+                        user=user,
                     )
                 )
             elif not info["reachable"] and status == "offline":
@@ -944,9 +970,10 @@ class Tuimux(App):
                 rows.append(
                     _row(
                         dead,
-                        name=(("○ ", "dim"), (host, "dim")) + owner_tag,
+                        name=(("○ ", "dim"), (host, "dim")),
                         status=(("offline", "dim italic"),),
                         state=((seen, "dim"),) if seen else (),
+                        user=user,
                     )
                 )
                 # The host is down, but its tmux sessions almost certainly are
@@ -970,9 +997,10 @@ class Tuimux(App):
                 rows.append(
                     _row(
                         dead,
-                        name=(("◐ ", AMBER), (host, f"bold {AMBER}")) + owner_tag,
+                        name=(("◐ ", AMBER), (host, f"bold {AMBER}")),
                         status=(("busy", AMBER),),
                         folder=(("high load — slow to respond", "dim"),),
+                        user=user,
                     )
                 )
             elif not info["reachable"]:
@@ -981,9 +1009,10 @@ class Tuimux(App):
                 rows.append(
                     _row(
                         dead,
-                        name=(("◐ ", AMBER), (host, f"bold {AMBER}")) + owner_tag,
-                        status=(("no ssh", AMBER),) + login_tag,
+                        name=(("◐ ", AMBER), (host, f"bold {AMBER}")),
+                        status=(("no ssh", AMBER),),
                         folder=(("tailscale up --ssh", "dim"),),
+                        user=user,
                     )
                 )
             else:
@@ -996,9 +1025,10 @@ class Tuimux(App):
                 rows.append(
                     _row(
                         machine,
-                        name=(("● ", color), (host, f"bold {color}")) + owner_tag,
-                        status=(word,) + login_tag,
+                        name=(("● ", color), (host, f"bold {color}")),
+                        status=(word,),
                         state=(("☕ awake", AMBER),) if info["awake"] else (),
+                        user=user,
                     )
                 )
                 # Just-reconnected? Show for RECONCILE_TTL which sessions are the
@@ -1031,14 +1061,13 @@ class Tuimux(App):
                             state=((s["state"], _STATE_STYLE.get(s["state"], "")),),
                             uptime=((s["uptime"], "dim"),),
                             folder=((s["dir"], "dim"),),
-                            tabs=((s["tabs"], "dim"),),
+                            tabs=self._tabs_cell(s["tabs"]),
                             open_in=tuple(self._open_in_cell(s, locs))
                             + (
                                 (("  resumed", GREEN),)
                                 if verdicts.get(s["name"]) == "resumed"
                                 else ()
                             ),
-                            agent=(("claude", VIOLET),) if s["agent"] else (),
                         )
                     )
                 # Sessions that were here before the host dropped but didn't come

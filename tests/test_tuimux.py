@@ -1228,25 +1228,56 @@ def _view_org(hosts, results):
     return a._view()
 
 
-def test_view_org_shows_owner_and_unmapped_login_hint():
+def test_view_user_column_shows_owner_and_login():
     base = {"reachable": False, "busy": False, "notmux": False, "awake": False}
+    # full host tuples incl color + resolved login (last two columns)
     hosts = [
-        ("mybox", True, "online", "", "compute", "miquel", "", True),
-        ("herbert", False, "online", "", "compute", "arnau", "", False),
-        ("pujarnol", False, "online", "", "compute", "gemma", "mduran", True),
+        ("mybox", True, "online", "", "compute", "miquel", "", True, "#34d8b1", "mduranfrigola"),
+        ("herbert", False, "online", "", "compute", "arnau", "", False, "#73ccde", "mduranfrigola"),
+        ("pujarnol", False, "online", "", "compute", "gemma", "mduran", True, "#d573de", "mduran"),
     ]
     results = {
         "mybox": {**base, "reachable": True, "sessions": []},
         "pujarnol": {**base, "reachable": True, "sessions": []},
     }
     rows = _view_org(hosts, results)
-    # owner tag appears on remote machines in org view
+    user_col = app._COLS.index("user")
+
+    def user_of(label):
+        cells = next(c for c, _ in rows if label in _cell_text(c[0]))
+        return _cell_text(cells[user_col])
+
+    # local: owner + the login we use (differ) — shown even though it's "you"
+    assert "miquel" in user_of("mybox") and "mduranfrigola" in user_of("mybox")
+    # unmapped foreign (no account): owner only, no login spelled out
+    assert user_of("herbert").strip() == "arnau"
+    # mapped foreign: owner + the login we connect as
+    assert "gemma" in user_of("pujarnol") and "mduran" in user_of("pujarnol")
+    # herbert is still the un-probed "no login" hint row
     herbert = next(c for c, _ in rows if "herbert" in _cell_text(c[0]))
-    assert "arnau" in _cell_text(herbert[0])  # owner shown
-    assert "no login" in _cell_text(herbert[1])  # unmapped → not probed
-    # a mapped host shows the login it connects as
-    puj = next(c for c, _ in rows if "pujarnol" in _cell_text(c[0]))
-    assert "mduran" in _cell_text(puj[1])
+    assert "no login" in _cell_text(herbert[1])
+
+
+def test_user_cell_never_empty_and_dedupes():
+    uc = app.Tuimux._user_cell
+    # unmapped foreign (no real login) → owner only
+    assert uc("arnau", "mduranfrigola", False, False) == (("arnau", "dim"),)
+    # own/mapped + login differs → both, even when it's your own box
+    assert uc("miquel", "mduranfrigola", True, False) == (("miquel · mduranfrigola", "dim"),)
+    # owner == login → shown once (it's ok for them to be equal)
+    assert uc("arnau", "arnau", True, False) == (("arnau", "dim"),)
+    # consumer device → owner only (no ssh login)
+    assert uc("miquel", "mduranfrigola", True, True) == (("miquel", "dim"),)
+    # nothing known → never blank
+    assert uc("", "", True, False) == (("—", "dim"),)
+
+
+def test_tabs_cell_tints_claude():
+    tc = app.Tuimux._tabs_cell
+    assert tc("1  zsh") == (("1  zsh", "dim"),)
+    agent = tc("2  claude")
+    assert agent[-1] == ("claude", app.VIOLET)  # command tinted violet
+    assert "dim" in agent[0][1]  # the count stays dim
 
 
 def test_view_org_unmapped_row_is_login_actionable():
