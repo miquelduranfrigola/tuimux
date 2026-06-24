@@ -65,9 +65,11 @@ GREEN = "#9ece6a"  # active session / running / working
 # Per-session STATE word → colour (weight stays plain; colour carries meaning).
 _STATE_STYLE = {"waiting": AMBER, "working": GREEN, "running": GREEN, "idle": "dim"}
 
-# Stable per-machine accent: this machine is always teal; each remote hashes its
-# name into this palette. engine.sh `host_color` mirrors this exactly (same
-# palette + hash) so a session's tmux status bar matches its colour here.
+# Per-machine accent. The engine (host_color) is the source of truth — it derives
+# a distinct colour per host from the canonical fleet ordering and hands it to the
+# dashboard via the hosts_data `color` column, so the tmux status bar always
+# matches. This local hash is only a fallback for older engine output that doesn't
+# emit the column (and to keep the older view-model tests working).
 HOST_PALETTE = (
     "#7aa2f7",
     "#b08cff",
@@ -141,7 +143,10 @@ def fetch_hosts(scope="mine"):
         mapping = parts[6].strip() if len(parts) > 6 else ""
         # probe defaults true when the engine doesn't say (older output / your own).
         probe = parts[7].strip() != "0" if len(parts) > 7 else True
-        res.append((name, is_local, status, lastseen, kind, owner, mapping, probe))
+        # accent colour computed by the engine (host_color) — kept there as the
+        # single source of truth so the tmux status bar matches this row exactly.
+        color = parts[8].strip() if len(parts) > 8 else ""
+        res.append((name, is_local, status, lastseen, kind, owner, mapping, probe, color))
     # Order: your own machines first (so the fleet view still opens on you), then
     # other owners grouped together, consumers (phones/tablets) always last. Stable
     # sort keeps the engine's self-leads order within each group.
@@ -871,6 +876,7 @@ class Tuimux(App):
             owner = h[5] if len(h) > 5 else ""
             mapping = h[6] if len(h) > 6 else ""
             want_probe = h[7] if len(h) > 7 else True
+            accent = h[8] if len(h) > 8 else ""  # engine-computed color (may be "")
             info = self._results.get(host)
             consumer = kind == "consumer"
             machine = {
@@ -977,7 +983,9 @@ class Tuimux(App):
             else:
                 # reachable — machine header, tinted with the machine's accent
                 # (local = teal; each remote its own colour). STATUS word matches.
-                color = _host_color(host, is_local)
+                # Use the engine's colour (so the tmux bar matches); fall back to
+                # the local hash only if it's somehow absent (older engine output).
+                color = accent or _host_color(host, is_local)
                 word = ("local" if is_local else "ssh", f"bold {color}")
                 rows.append(
                     _row(

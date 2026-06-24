@@ -160,19 +160,50 @@ self_host() {
 }
 is_local() { [ "$1" = "$(self_host)" ]; }
 
-# Stable per-machine accent colour. MUST mirror app.py _host_color / HOST_PALETTE
-# (same palette + hash) so a session's tmux status bar matches the machine's
-# colour in the dashboard: this machine is always teal; each remote hashes its
-# name into the palette.
+# Canonical tailnet fleet: every device name, sorted — the same absolute, stable
+# ordering on every machine and for every teammate, so a host's accent colour is
+# identical everywhere. Derived from one place (here) and exposed to the dashboard
+# as a hosts_data column, so the UI and the tmux status bar can never disagree.
+fleet_order() {
+  ts_status | awk '$1 ~ /^[0-9]/ && NF>=2 {print $2}' | LC_ALL=C sort -u
+}
+# 0-based position of a host in the fleet ordering (or the count, i.e. "past the
+# end", for a name not in the tailnet — e.g. a TUIMUX_HOSTS-only entry).
+fleet_index() {
+  local h="$1" i=0 name
+  while IFS= read -r name; do
+    [ "$name" = "$h" ] && { printf '%d' "$i"; return; }
+    i=$((i + 1))
+  done <<EOF
+$(fleet_order)
+EOF
+  printf '%d' "$i"
+}
+
+# Stable per-machine accent colour. This machine is always teal; every other host
+# gets its own distinct hue from its fleet index (golden-angle stepping around the
+# colour wheel → adjacent machines look clearly different, and a given host is the
+# same colour everywhere). The dashboard reuses this exact value (hosts_data color
+# column), so a session's tmux status bar always matches its row.
 host_color() {
-  local h="$1" hash=5381 i ch
-  is_local "$h" && { printf '#34d8b1'; return; }
-  local palette=("#7aa2f7" "#b08cff" "#9ece6a" "#56cfe1" "#f7768e" "#ff9e64" "#c678dd")
-  for ((i = 0; i < ${#h}; i++)); do   # djb2, masked to 32 bits to match app.py
-    printf -v ch '%d' "'${h:i:1}"
-    hash=$(((hash * 33 + ch) & 0xFFFFFFFF))
-  done
-  printf '%s' "${palette[hash % ${#palette[@]}]}"
+  is_local "$1" && { printf '#34d8b1'; return; }
+  awk -v i="$(fleet_index "$1")" '
+    function abs(x) { return x < 0 ? -x : x }
+    BEGIN {
+      H = i * 137.508; H = H - int(H / 360) * 360   # golden-angle hue, wrapped to [0,360)
+      S = 0.62; L = 0.66                            # tuned for dark text on the bar
+      C = (1 - abs(2 * L - 1)) * S
+      Hp = H / 60.0
+      X = C * (1 - abs((Hp - 2 * int(Hp / 2)) - 1))
+      m = L - C / 2
+      if      (Hp < 1) { r = C; g = X; b = 0 }
+      else if (Hp < 2) { r = X; g = C; b = 0 }
+      else if (Hp < 3) { r = 0; g = C; b = X }
+      else if (Hp < 4) { r = 0; g = X; b = C }
+      else if (Hp < 5) { r = X; g = 0; b = C }
+      else             { r = C; g = 0; b = X }
+      printf "#%02x%02x%02x", int((r+m)*255+0.5), int((g+m)*255+0.5), int((b+m)*255+0.5)
+    }'
 }
 
 # tmux options tuimux sets on every session it drives, as a "cmd1; cmd2; " prefix
@@ -373,15 +404,16 @@ true'
 
 # ----- machine-readable backend for the Textual UI ---------------------------
 # List machines, tab-separated:
-#   host \t islocal(0/1) \t status \t lastseen \t kind \t owner \t mapping \t probe
+#   host \t islocal(0/1) \t status \t lastseen \t kind \t owner \t mapping \t probe \t color
 #   kind    "compute" (we SSH into it) or "consumer" (phone/tablet — status only)
 #   owner   tailnet owner login (e.g. "arnau"), for the org-fleet view
 #   mapping explicit per-host login, or empty (lets the UI show "as <user>")
 #   probe   1 if tuimux should SSH-probe it (local, your own, or mapped), else 0 —
 #           org-view hosts you have no account on are listed but not probed
+#   color   the machine's accent (host_color) — UI uses it so the tmux bar matches
 # Self leads; Tailscale-offline ones follow; the dashboard re-sorts consumers last.
 hosts_data() {
-  local h hosts name seen me myowner kind owner mapping probe
+  local h hosts name seen me myowner kind owner mapping probe color
   # one tailscale snapshot for the whole call (exported so the subshells below
   # reuse it via ts_status/ts_ip), and resolve "me"/owner once instead of per host.
   export _EOS_TS_STATUS _EOS_TS_IP
@@ -394,17 +426,19 @@ hosts_data() {
     is_consumer "$h" && kind=consumer || kind=compute
     owner="$(host_owner "$h")"; [ -n "$owner" ] || owner="$myowner"
     mapping="$(mapping_for "$h")"
+    color="$(host_color "$h")"
     # probe our own machines + anything we've mapped a login for; skip the rest
     if [ "$h" = "$me" ] || [ "$owner" = "$myowner" ] || [ -n "$mapping" ]; then probe=1; else probe=0; fi
-    [ "$h" = "$me" ] && printf '%s\t1\tonline\t\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" \
-                     || printf '%s\t0\tonline\t\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe"
+    [ "$h" = "$me" ] && printf '%s\t1\tonline\t\t%s\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" "$color" \
+                     || printf '%s\t0\tonline\t\t%s\t%s\t%s\t%s\t%s\n' "$h" "$kind" "$owner" "$mapping" "$probe" "$color"
   done
   offline_hosts | while IFS="$(printf '\t')" read -r name seen; do
     [ -n "$name" ] || continue
     is_consumer "$name" && kind=consumer || kind=compute
     owner="$(host_owner "$name")"; [ -n "$owner" ] || owner="$myowner"
     mapping="$(mapping_for "$name")"
-    printf '%s\t0\toffline\t%s\t%s\t%s\t%s\t0\n' "$name" "$seen" "$kind" "$owner" "$mapping"
+    color="$(host_color "$name")"
+    printf '%s\t0\toffline\t%s\t%s\t%s\t%s\t0\t%s\n' "$name" "$seen" "$kind" "$owner" "$mapping" "$color"
   done
 }
 

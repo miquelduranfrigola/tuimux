@@ -1217,6 +1217,43 @@ def test_view_org_unmapped_row_is_login_actionable():
     assert meta.get("consumer") is False  # u (set login) applies
 
 
+# ---- absolute per-machine colours (engine.sh) -------------------------------
+# Sorted fleet from the stub: curie(0) herbert(1) mybox(2) phone(3).
+def test_fleet_index_follows_sorted_order():
+    assert _engine_eval("fleet_index curie").strip() == "0"
+    assert _engine_eval("fleet_index herbert").strip() == "1"
+    assert _engine_eval("fleet_index phone").strip() == "3"
+
+
+def test_host_color_local_teal_remotes_distinct_and_stable():
+    # mybox is self in the stub → always teal; others get distinct fleet-index hues.
+    assert _engine_eval("host_color mybox").strip() == "#34d8b1"
+    herb = _engine_eval("host_color herbert").strip()
+    phone = _engine_eval("host_color phone").strip()
+    assert re.match(r"^#[0-9a-f]{6}$", herb) and re.match(r"^#[0-9a-f]{6}$", phone)
+    assert herb != phone  # different index → different colour
+    assert _engine_eval("host_color herbert").strip() == herb  # deterministic
+
+
+def test_hosts_data_emits_color_column():
+    rows = [ln.split("\t") for ln in _engine_eval("hosts_data", scope="org").splitlines()]
+    by = {r[0]: r for r in rows}
+    assert by["mybox"][8] == "#34d8b1"  # local → teal
+    assert re.match(r"^#[0-9a-f]{6}$", by["herbert"][8])
+    assert by["herbert"][8] != by["phone"][8]
+
+
+def test_view_uses_engine_color_for_machine_header():
+    # The dashboard must paint the header with the engine-supplied colour (so it
+    # matches the tmux bar), not recompute its own.
+    hosts = [("rem", False, "online", "", "compute", "arnau", "", True, "#abcdef")]
+    base = {"reachable": True, "busy": False, "notmux": False, "awake": False}
+    rows = _view_for(hosts, {"rem": {**base, "sessions": []}})
+    header = rows[0][0]
+    styles = _cell_styles(header[0]) + " " + _cell_styles(header[1])
+    assert "#abcdef" in styles
+
+
 if __name__ == "__main__":
     import inspect
 
