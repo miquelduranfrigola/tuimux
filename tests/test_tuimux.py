@@ -734,37 +734,75 @@ def test_open_in_cell():
     a._self_win = "1"
 
     def cell(s):
-        # collapse to "local · host" words, dropping the dim separator/styles
+        # the word tokens, dropping the dim " · " separator
         segs = a._open_in_cell(s, a._window_locs(s["name"]))
-        return (segs[0][0], segs[-1][0])
+        return [seg[0] for seg in segs if seg[0] != " · "]
 
-    # nowhere → "— · detached"
-    assert cell({"name": "x", "attached": False, "nclients": 0}) == ("—", "detached")
-    # open here, one client on host
-    assert cell({"name": "main", "attached": True, "nclients": 1}) == (
-        "this window",
-        "on host",
-    )
-    # open in another local window
-    assert cell({"name": "build", "attached": True, "nclients": 1}) == (
-        "other window",
-        "on host",
-    )
-    # attached on host but no local tab here → "— · on host"
-    assert cell({"name": "zzz", "attached": True, "nclients": 1}) == ("—", "on host")
-    # stale local tab: open here but detached on the host
-    assert cell({"name": "main", "attached": False, "nclients": 0}) == (
-        "this window",
-        "detached",
-    )
-    # open here and also attached elsewhere → "this window · 2 clients"
-    assert cell({"name": "main", "attached": True, "nclients": 2}) == (
-        "this window",
-        "2 clients",
-    )
-    # attached but no client line (e.g. switch-client'd away): host tracks
-    # `attached`, so it stays "on host" rather than disagreeing with the bold name
-    assert cell({"name": "zzz", "attached": True, "nclients": 0}) == ("—", "on host")
+    # a local tab → just that one token; the host attachment is implied
+    assert cell({"name": "main", "attached": True, "nclients": 1}) == ["this window"]
+    assert cell({"name": "build", "attached": True, "nclients": 1}) == ["other window"]
+    # a local tab wins even if the host shows it detached (you can still jump there)
+    assert cell({"name": "main", "attached": False, "nclients": 0}) == ["this window"]
+    # no local tab → "— · <attachment on the owning host>"
+    assert cell({"name": "x", "attached": False, "nclients": 0}) == ["—", "detached"]
+    assert cell({"name": "zzz", "attached": True, "nclients": 1}) == ["—", "1 client"]
+    assert cell({"name": "zzz", "attached": True, "nclients": 2}) == ["—", "2 clients"]
+    # switch-client'd away: attached with no client line → still a held client
+    assert cell({"name": "zzz", "attached": True, "nclients": 0}) == ["—", "1 client"]
+    # we never say "on host" anymore (confusing for local sessions)
+    for s in ({"name": "main", "attached": True, "nclients": 1},
+              {"name": "zzz", "attached": True, "nclients": 3}):
+        words = " ".join(cell(s))
+        assert "on host" not in words
+
+
+def _session(name, **kw):
+    return {
+        "name": name, "auto": name,
+        "attached": kw.get("attached", False),
+        "nclients": kw.get("nclients", 0),
+        "dir": kw.get("dir", "~/p"), "tabs": "1  zsh",
+        "state": kw.get("state", "running"),
+        "uptime": "1h", "created": "1", "agent": kw.get("agent", False),
+    }
+
+
+def test_session_rows_use_device_accent_and_dim_metadata():
+    base = {"reachable": True, "busy": False, "notmux": False, "awake": False}
+    hosts = [("rem", False, "online", "", "compute", "arnau", "", True, "#abcdef")]
+    results = {"rem": {**base, "sessions": [
+        _session("att", attached=True, state="running"),
+        _session("idle1", attached=False, state="idle"),
+        _session("run1", attached=False, state="running"),
+    ]}}
+    rows = _view_for(hosts, results)
+
+    def cells_for(n):
+        return next(c for c, _ in rows if n in _cell_text(c[0]))
+
+    # attached → bold accent; idle+unattached → dim; otherwise plain accent
+    assert "bold #abcdef" in _cell_styles(cells_for("att")[0])
+    assert "dim" in _cell_styles(cells_for("idle1")[0])
+    run_name = _cell_styles(cells_for("run1")[0])
+    assert "#abcdef" in run_name and "bold" not in run_name
+    # folder (col 4) is dim metadata now, not a fixed cyan
+    assert _cell_styles(cells_for("att")[4]) == "dim"
+
+
+def test_waiting_agent_is_amber_working_is_not():
+    base = {"reachable": True, "busy": False, "notmux": False, "awake": False}
+    hosts = [("rem", False, "online", "", "compute", "arnau", "", True, "#abcdef")]
+    results = {"rem": {**base, "sessions": [
+        _session("w", agent=True, state="waiting"),
+        _session("k", agent=True, state="working"),
+    ]}}
+    rows = _view_for(hosts, results)
+    state = {}  # session name → STATE cell styles (col 2)
+    for c, m in rows:
+        if m.get("session") in ("w", "k"):
+            state[m["session"]] = _cell_styles(c[2])
+    assert app.AMBER in state["w"]      # waiting wants you → amber
+    assert app.AMBER not in state["k"]  # working is calm
 
 
 def test_disposable_tmux_session():

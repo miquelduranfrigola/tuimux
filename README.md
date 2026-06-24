@@ -88,16 +88,14 @@ window happens to be frontmost), or in a new window if you ask for one. If a ses
 is already open on this machine, the menu offers **"go to its tab"** instead of
 opening a duplicate.
 
-**The "OPEN IN" column** reads as two independent facts, `local · host`:
-
-- *local* — where it's open on **this machine**: `this window` (a tab in the
-  dashboard's own window), `other window`, or `—` (not open here).
-- *host* — its live attachment **where it actually runs**: `on host` (one client),
-  `N clients`, or `detached` (no client).
-
-The two can disagree, and that's the point: `— · on host` is a session attached
-from elsewhere (its own console or another device) with no tab here; `this window ·
-detached` is a stale local tab whose connection to the host has dropped.
+**The "OPEN IN" column** tells you where you can reach the session. If it's open
+as a tab on **this machine** it says so and stops — `this window` (a tab in the
+dashboard's own window) or `other window` — because you can just jump to it. If
+it isn't open here (`—`) it reports its attachment **on the host that runs it**:
+`N clients` when something else holds it (e.g. a teammate attached on a shared
+box), or `detached` when nothing is. So `— · 2 clients` is a session you have no
+local tab for but that two clients are in, and `— · detached` is idle and free to
+open fresh.
 
 **When a machine goes offline** (asleep, off the network, or shut down) its sessions
 don't vanish — they stay listed, dimmed, marked **`unreachable`**, showing what was

@@ -62,8 +62,11 @@ VIOLET = "#b08cff"  # agent
 AMBER = "#e0af68"  # awake / waiting / no-ssh
 GREEN = "#9ece6a"  # active session / running / working
 
-# Per-session STATE word → colour (weight stays plain; colour carries meaning).
-_STATE_STYLE = {"waiting": AMBER, "working": GREEN, "running": GREEN, "idle": "dim"}
+# Per-session STATE word → colour. Only the one state that *wants you* (a waiting
+# agent) gets a colour — amber. Everything else is plain or dim, so the device's
+# own accent stays the dominant colour in its block and amber actually stands out.
+# (No green here: it would collide with the green-ish device accents.)
+_STATE_STYLE = {"waiting": AMBER, "working": "", "running": "", "idle": "dim"}
 
 # Per-machine accent. The engine (host_color) is the source of truth — it derives
 # a distinct colour per host from the canonical fleet ordering and hands it to the
@@ -832,41 +835,44 @@ class Tuimux(App):
         return locs
 
     def _open_in_cell(self, s, locs):
-        """OPEN IN as two tokens, "<local> · <host>":
+        """OPEN IN — where you can reach this session.
 
-          local — where it's open on THIS Mac: this window / other window / — (none)
-          host  — its live attachment on the host where it runs: on host (1 client) /
-                  N clients (more) / detached (none)
-
-        The two are independent: a stale local tab reads "this window · detached",
-        and a session attached only from elsewhere reads "— · on host"."""
+        If it's open as a tab on THIS Mac, say just that ("this window" /
+        "other window") and stop: you can jump to it, and the host-side attachment
+        is implied. Otherwise ("—", no local tab) report its attachment on the host
+        that runs it — "N clients" if something holds it (e.g. a teammate on a
+        shared box), else "detached". We never say "on host": for a local session
+        the host *is* this Mac, which only ever read as confusing."""
         if "this window" in locs:
-            local = ("this window", LOCAL)
-        elif locs:
-            local = ("other window", LOCAL)
-        else:
-            local = ("—", "dim")
+            return [("this window", "")]
+        if locs:
+            return [("other window", "dim")]
         n = s.get("nclients", 0)
-        # The host axis reads attachment the same way the NAME does (s["attached"]),
-        # so the two can never disagree — e.g. a client that switch-client'd away can
-        # leave session_attached set with no list-clients line; trust attached here
-        # and let nclients only split one client ("on host") from many ("N clients").
-        if s.get("attached") or n:
-            host = ("on host", REMOTE) if n <= 1 else (f"{n} clients", REMOTE)
+        # No local tab, but a client may still hold it from elsewhere. Trust
+        # attached too (a switch-client'd session can show attached with no
+        # list-clients line); n only splits one client from many.
+        if n > 1:
+            host = (f"{n} clients", "dim")
+        elif n == 1 or s.get("attached"):
+            host = ("1 client", "dim")
         else:
             host = ("detached", "dim")
-        return [local, (" · ", "dim"), host]
+        return [("—", "dim"), (" · ", "dim"), host]
 
     # Build the table as plain data — a list of (cells, meta) rows — so we can
     # diff cheaply and only repaint when something actually changed.
     #
-    # Emphasis convention (keep consistent when editing styles here):
-    #   bold  → identifiers only: an online machine's NAME + STATUS word, and an
-    #           attached session's NAME. Nothing else is ever bold.
-    #   dim   → inactive/transient (offline & "checking…" machines, idle
-    #           sessions), plain numeric metrics (uptime, tabs), and hints.
-    #   plain → markers, STATE values, and colour-coded fields (folder, open-in,
-    #           agent) — meaning carried by colour, not weight.
+    # Colour & emphasis convention (keep consistent when editing styles here):
+    #   accent → the device's own colour, used as the identity thread: its machine
+    #            NAME/STATUS *and* its session NAMEs. Within a device block this is
+    #            the only hue — so each device reads as one calm colour family.
+    #   bold   → identifiers: an online machine's NAME + STATUS word, and an
+    #            attached session's NAME (bold accent). Nothing else is bold.
+    #   amber  → the one thing that wants you: an agent STATE of "waiting" (plus
+    #            keep-awake / no-ssh markers). Kept rare so it actually pops.
+    #   violet → the "claude" agent tag — a single, global "this is an AI agent".
+    #   dim    → everything else: metadata (folder, tabs, uptime, OPEN IN),
+    #            idle/transient sessions, offline/"checking…" machines, hints.
     def _view(self):
         rows = []
         for h in self._hosts:
@@ -1007,6 +1013,14 @@ class Tuimux(App):
                     # pin down the tab, the menu honestly offers a new tab
                     # instead of promising focus the engine can't deliver.
                     locs = self._window_locs(s["name"])
+                    # Session name carries the device accent: bold when attached,
+                    # dim when it's just an idle shell, plain-accent otherwise.
+                    if s["attached"]:
+                        nm_style = f"bold {color}"
+                    elif s["state"] == "idle":
+                        nm_style = "dim"
+                    else:
+                        nm_style = color
                     rows.append(
                         _row(
                             {
@@ -1015,13 +1029,10 @@ class Tuimux(App):
                                 "action": "attach",
                                 "open": bool(locs),
                             },
-                            name=(
-                                ("  ", ""),
-                                (s["auto"], f"bold {GREEN}" if s["attached"] else ""),
-                            ),
+                            name=(("  ", ""), (s["auto"], nm_style)),
                             state=((s["state"], _STATE_STYLE.get(s["state"], "")),),
                             uptime=((s["uptime"], "dim"),),
-                            folder=((s["dir"], CYAN),),
+                            folder=((s["dir"], "dim"),),
                             tabs=((s["tabs"], "dim"),),
                             open_in=tuple(self._open_in_cell(s, locs))
                             + (
