@@ -573,13 +573,20 @@ def test_view_bold_only_on_identifiers():
     def find(label):
         return next(c for c, _ in rows if label in _cell_text(c[0]))
 
-    me = find("● me")
-    # Only the online machine NAME is bold — not its STATUS word, not sessions.
-    assert "bold" in _cell_styles(me[0])
+    def name_style(cells, text):
+        # style of the segment in the NAME cell whose text is `text`
+        return next(st for t, st in cells[0] if t.strip() == text)
+
+    me, off, att, det = find("me"), find("off"), find("att"), find("det")
+    # The machine NAME text is bold only when online; STATUS word/sessions never.
+    assert "bold" in name_style(me, "me")
+    assert "bold" not in name_style(off, "off")
+    assert "bold" not in name_style(att, "att")
+    assert "bold" not in name_style(det, "det")
     assert "bold" not in _cell_styles(me[1])  # STATUS word not bold
-    assert "bold" not in _cell_styles(find("att")[0])  # attached session not bold
-    assert "bold" not in _cell_styles(find("det")[0])  # detached session not bold
-    assert "bold" not in _cell_styles(find("○ off")[0])  # offline machine not bold
+    # The status dot is ALWAYS bold (green=ssh / orange=online / hollow=offline).
+    assert "bold" in name_style(me, "●")
+    assert "bold" in name_style(off, "○")
 
 
 def test_view_row_meta_actions():
@@ -1278,6 +1285,44 @@ def test_tabs_cell_tints_claude():
     agent = tc("2  claude")
     assert agent[-1] == ("claude", app.VIOLET)  # command tinted violet
     assert "dim" in agent[0][1]  # the count stays dim
+
+
+def test_status_dot_color_tracks_connection():
+    base = {"busy": False, "notmux": False, "awake": False}
+    hosts = [
+        ("ok", False, "online", "", "compute"),
+        ("noss", False, "online", "", "compute"),
+        ("off", False, "offline", "2h", "compute"),
+    ]
+    results = {
+        "ok": {**base, "reachable": True, "sessions": []},
+        "noss": {**base, "reachable": False, "sessions": []},
+        "off": {**base, "reachable": False, "sessions": [], "lastseen": "2h"},
+    }
+    rows = _view_for(hosts, results)
+    dot = {}
+    for cells, m in rows:
+        if m.get("host") and m.get("session") is None:
+            dot[m["host"]] = next(
+                (t.strip(), st) for t, st in cells[0] if t.strip() in ("●", "○")
+            )
+    assert dot["ok"] == ("●", f"bold {app.GREEN}")  # reachable over SSH → green
+    assert dot["noss"] == ("●", f"bold {app.AMBER}")  # online, no SSH → orange
+    assert dot["off"] == ("○", f"bold {app.MUTED}")  # offline → hollow gray
+
+
+def test_offline_host_with_probe_zero_renders_offline():
+    # Offline hosts come back with probe=0 and are never probed (info stays None),
+    # so the offline branch must win over "no login"/"checking" — decided by status.
+    hosts = [
+        ("down", False, "offline", "3h ago", "compute", "gemma", "", False, "#b08cff", "me")
+    ]
+    rows = _view_for(hosts, {})  # no probe result
+    cells, meta = rows[0]
+    assert meta["action"] == "none"
+    assert "offline" in _cell_text(cells[1]) and "3h ago" in _cell_text(cells[2])
+    dot = next(t.strip() for t, _ in cells[0] if t.strip() in ("●", "○"))
+    assert dot == "○"
 
 
 def test_view_org_unmapped_row_is_login_actionable():

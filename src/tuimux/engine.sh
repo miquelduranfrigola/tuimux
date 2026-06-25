@@ -527,17 +527,6 @@ detach_session() {
   rssh "$host" "tmux detach-client -s '$session' 2>/dev/null"
 }
 
-# tmux's own interactive control panel (choose-tree): the live session/window
-# tree where arrows navigate, enter switches, x kills, etc.
-tmux_browse() {            # runs inside the spawned tab; takes it over into tmux
-  local host="$1" cmd
-  # attach to a real session (not the keep-awake helper), then open the tree
-  cmd='t=$(tmux ls -F "#{session_name}" 2>/dev/null | grep -vx "'"$AWAKE_SESSION"'" | head -n1)
-if [ -n "$t" ]; then exec tmux attach -t "$t" \; choose-tree -Zs; else exec tmux attach \; choose-tree -Zs; fi'
-  if is_local "$host"; then exec sh -c "$cmd"
-  else exec env TERM="$TUIMUX_REMOTE_TERM" ssh -t "${SSH_OPTS[@]}" "$(login_for "$host")@$host" "$cmd"; fi
-}
-
 # Open the Tailscale admin console (machines page) in the default browser —
 # handy for checking online/DNS/ACL state when a host shows up as "no ssh".
 open_console() {
@@ -737,9 +726,6 @@ term_spawn() {
 # Note: spawned surfaces re-enter the engine via `bash <engine> …` rather than
 # the `tuimux` wrapper, so the new tab skips a whole Python interpreter startup
 # (~150ms) before it can attach.
-open_browse() {            # open a new surface that drops into tmux's control panel
-  term_spawn tab bash "$ENGINE_FILE" __browse "$1"
-}
 
 # List the local terminal's windows/tabs and which window each lives in, so the
 # dashboard can show where a session is open ("this window" vs another). Output:
@@ -1394,8 +1380,6 @@ case "${1:-}" in
   __detach      ) shift; detach_session "${1:-}" "${2:-}" ;;
   __killraw     ) shift; rssh "${1:-}" "tmux kill-session -t '${2:-}' 2>/dev/null" ;;
   __renameto    ) shift; rssh "${1:-}" "tmux rename-session -t '${2:-}' '${3:-}'" ;;
-  __browse      ) shift; tmux_browse "${1:-}" ;;
-  __openbrowse  ) shift; open_browse "${1:-}" ;;
   __windows     ) list_windows ;;
   __selfwin     ) self_winid ;;
   __autoname    ) docker_name ;;
